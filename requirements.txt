@@ -1,0 +1,6 @@
+fastapi==0.115.11 
+openai==1.68.2 
+python-dotenv==1.0.1 
+langchain==0.3.21   
+uvicorn==0.34.0
+youtube-transcript-api==1.0.2 
