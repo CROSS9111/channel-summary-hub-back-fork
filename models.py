@@ -58,7 +58,6 @@ class Video(Base):
     user_id = Column(BigInteger, ForeignKey("users.id"), nullable=True)  # ユーザーとの紐付け用カラム
     channel_id = Column(BigInteger, ForeignKey("channels.id"), nullable=False)
 
-
     # YouTube の動画IDをここに保存
     youtube_video_id = Column(String(255), unique=True, nullable=False)
 

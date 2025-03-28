@@ -1,5 +1,6 @@
 import os
 import json
+import logging
 import requests
 from datetime import datetime
 from fastapi import FastAPI, HTTPException
@@ -19,6 +20,9 @@ from sqlalchemy.orm import Session
 from redis_queue import RedisTaskQueue
 
 load_dotenv(".env.local", override=True)
+
+# ロギング設定（DEBUG レベルのログをコンソール出力）
+logging.basicConfig(level=logging.DEBUG, format="%(asctime)s [%(levelname)s] %(message)s")
 
 app = FastAPI()
 
@@ -52,14 +56,23 @@ class SummaryResponse(BaseModel):
     video_details: dict
 
 class VideoSummary(BaseModel):
-    video_id: str
+    videoId: str
     title: str
     summary_date: str
     channel_name: str
     thumbnail_high: str
+    channel_id:str
+    updated_at:datetime
+    summary:str
+    keyPoints:str  
 
 class UserSummariesResponse(BaseModel):
     username: str
+    summaries: list[VideoSummary]
+
+# 追加：チャンネル向けのレスポンスモデル
+class ChannelSummariesResponse(BaseModel):
+    channel_name: str
     summaries: list[VideoSummary]
 
 def extract_video_id(url: str) -> str:
@@ -216,11 +229,15 @@ def get_user_summaries(user_id: int):
         summaries = []
         for video in videos:
             summaries.append(VideoSummary(
-                video_id=video.youtube_video_id,
+                videoId=video.youtube_video_id,
                 title=video.title,
                 summary_date=video.updated_at.isoformat() if video.updated_at else None,
                 channel_name=video.channel_title,
-                thumbnail_high=video.thumbnail_high
+                channel_id=str(video.channel_id),  # ここで channel_id を追加
+                thumbnail_high=video.thumbnail_high,
+                updated_at=video.updated_at,
+                summary="",       # 要約情報
+                keyPoints= ""         # 重要ポイント
             ))
         return UserSummariesResponse(username=user.username, summaries=summaries)
     except Exception as e:
@@ -237,13 +254,54 @@ def get_video_summary(video_id: str):
         if not video:
             raise HTTPException(status_code=404, detail="動画の要約が見つかりません。")
         return VideoSummary(
-            video_id=video.youtube_video_id,
+            videoId=video.youtube_video_id,
             title=video.title,
             summary_date=video.updated_at.isoformat() if video.updated_at else None,
             channel_name=video.channel_title,
+            channel_id=str(video.channel_id),
             thumbnail_high=video.thumbnail_high,
-            summary=video.summary_text,      # 要約情報
-            keyPoints=video.final_points       # 重要ポイント
+            updated_at=video.updated_at,  # ここを追加
+            summary=video.summary_text or "",       # 要約情報
+            keyPoints=video.final_points or ""         # 重要ポイント
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        session.close()
+
+@app.get("/channels/{channel_id}/summaries", response_model=ChannelSummariesResponse)
+def get_channel_summaries(channel_id: int):
+    session: Session = SessionLocal()
+    try:
+        # チャンネル情報を取得
+        channel = session.query(Channel).filter(Channel.id == channel_id).first()
+        if not channel:
+            raise HTTPException(status_code=404, detail="チャンネルが見つかりません。")
+        
+        # 当該チャンネルに紐づく、要約済み動画（summary_text が存在する動画）を取得
+        videos = (
+            session.query(Video)
+            .filter(Video.channel_id == channel_id, Video.summary_text.isnot(None))
+            .order_by(Video.updated_at.desc())
+            .all()
+        )
+        
+        summaries = []
+        for video in videos:
+            summaries.append(VideoSummary(
+                videoId=video.youtube_video_id,
+                title=video.title,
+                summary_date=video.updated_at.isoformat() if video.updated_at else None,
+                channel_name=video.channel_title,
+                channel_id=str(video.channel_id),
+                thumbnail_high=video.thumbnail_high,
+                updated_at=video.updated_at,  # ここを追加
+                summary=video.summary_text,      # 要約情報
+                keyPoints=video.final_points       # 重要ポイント
+            ))
+        return ChannelSummariesResponse(
+            channel_name=channel.channel_name,
+            summaries=summaries
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
