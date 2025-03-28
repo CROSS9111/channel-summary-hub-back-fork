@@ -1,42 +1,118 @@
 import os
+import json
 import tempfile
 import subprocess
 import glob
 import logging
-from celery import Celery
-from celery.utils.log import get_task_logger
+from datetime import datetime
+import requests
+from youtube_transcript_api import YouTubeTranscriptApi
+from urllib.parse import urlparse, parse_qs
+from dotenv import load_dotenv
+import yt_dlp
 from azure.storage.blob import BlobServiceClient
-from openai import OpenAI
-from db_models import SessionLocal, Video, Task as DBTask  # DBTaskはTaskテーブルのORMモデル
-from celery_config import celery_app
+from models import SessionLocal, Video, DBTask   # それぞれの ORM モデル
+from langchain.text_splitter import CharacterTextSplitter
+import json
+import os
+from fastapi import HTTPException  # 必要に応じてインポート
+from openai import AzureOpenAI
 
-logger = get_task_logger(__name__)
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.DEBUG)  # DEBUGレベルも出力する
 
-@celery_app.task(name="tasks.high_priority.transcribe_audio", bind=True, queue="high_priority", priority=9, max_retries=2)
-def transcribe_audio(self, video_id: str, audio_url: str):
-    """
-    Blobから音声ファイルをダウンロードし、OpenAIの音声書き起こしAPI（gpt-4o-transcribe）でテキスト化するタスク。
-    20MBを超える場合はffmpegで分割処理し、各分割ファイルに対してSTTを実施します。
-    タスク失敗時は最大2回まで自動再試行します。
-    """
+def download_audio(video_id: str, youtube_url: str):
+    logger.info(f"[download_audio] Start video_id={video_id}, youtube_url={youtube_url}")
+    session = SessionLocal()
+    try:
+        db_task = DBTask(
+            video_id=video_id,
+            task_type="DOWNLOAD_AUDIO",
+            status="IN_PROGRESS",
+            priority=9,
+        )
+        session.add(db_task)
+        session.commit()
+        logger.debug("DBTask for DOWNLOAD_AUDIO committed.")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            logger.debug(f"Temporary directory created: {tmpdir}")
+            audio_path_template = os.path.join(tmpdir, f"{video_id}.%(ext)s")
+            logger.debug(f"Audio path template: {audio_path_template}")
+            ydl_opts = {
+                'format': 'bestaudio/best',
+                'outtmpl': audio_path_template,
+                'postprocessors': [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'mp3',
+                    'preferredquality': '192',
+                }],
+                'quiet': True,
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                logger.debug("Starting audio download via yt_dlp...")
+                ydl.download([youtube_url])
+                logger.debug("Audio download finished.")
+            audio_file_path = os.path.join(tmpdir, f"{video_id}.mp3")
+            logger.debug(f"Checking for audio file at: {audio_file_path}")
+            if not os.path.exists(audio_file_path):
+                raise FileNotFoundError("Audio file download failed.")
+
+            blob_conn_str = os.getenv("AZURE_BLOB_CONNECTION_STRING")
+            container_name = os.getenv("AZURE_BLOB_CONTAINER", "youtube-audio")
+            logger.debug(f"Blob connection string exists: {bool(blob_conn_str)}, container: {container_name}")
+            if not blob_conn_str:
+                raise Exception("Azure Blob connection string not set.")
+
+            blob_service_client = BlobServiceClient.from_connection_string(blob_conn_str)
+            container_client = blob_service_client.get_container_client(container_name)
+            try:
+                container_client.create_container()
+                logger.debug("Container created successfully.")
+            except Exception as ce:
+                logger.debug("Container already exists or creation failed, ignoring: " + str(ce))
+            blob_client = container_client.get_blob_client(f"{video_id}.mp3")
+            with open(audio_file_path, "rb") as audio_data:
+                logger.debug("Uploading audio file to Blob Storage...")
+                blob_client.upload_blob(audio_data, overwrite=True)
+                logger.debug("Audio file uploaded.")
+
+        db_video = session.query(Video).filter(Video.video_id == video_id).first()
+        if db_video:
+            db_video.audio_url = blob_client.url
+            session.commit()
+            logger.debug(f"Video record updated with audio_url: {blob_client.url}")
+        else:
+            logger.error(f"Video record not found for video_id={video_id}")
+
+        db_task.status = "COMPLETED"
+        session.commit()
+        logger.info("[download_audio] Completed successfully.")
+    except Exception as e:
+        logger.error(f"Error in download_audio: {e}")
+        session.rollback()
+    finally:
+        session.close()
+
+def transcribe_audio(video_id: str, audio_url: str):
     logger.info(f"[transcribe_audio] Start video_id={video_id}, audio_url={audio_url}")
     session = SessionLocal()
     try:
-        # タスクレコードをDBに登録
         db_task = DBTask(
-            video_id=video_id,  # ※Videoテーブルのvideo_idフィールドと一致する値
+            video_id=video_id,
             task_type="TRANSCRIBE",
             status="IN_PROGRESS",
             priority=9,
         )
         session.add(db_task)
         session.commit()
+        logger.debug("DBTask for TRANSCRIBE committed.")
 
-        # 1. Azure Blob Storageから音声ファイルを一時ディレクトリにダウンロード
         blob_conn_str = os.getenv("AZURE_BLOB_CONNECTION_STRING", "")
         container_name = os.getenv("AZURE_BLOB_CONTAINER", "youtube-audio")
         if not blob_conn_str:
             raise Exception("No Blob connection string set.")
+        logger.debug(f"Blob connection string retrieved: {bool(blob_conn_str)}")
 
         blob_service_client = BlobServiceClient.from_connection_string(blob_conn_str)
         container_client = blob_service_client.get_container_client(container_name)
@@ -44,244 +120,183 @@ def transcribe_audio(self, video_id: str, audio_url: str):
 
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as temp_mp3:
             download_stream = blob_client.download_blob()
-            download_stream.readinto(temp_mp3)
+            with open(temp_mp3.name, "wb") as f:
+                f.write(download_stream.readall())
             temp_mp3_path = temp_mp3.name
+            logger.debug(f"Temporary mp3 file created: {temp_mp3_path}")
 
-        # 2. ファイルサイズチェック → 20MB超ならffmpegで分割（※ここでは分割処理の詳細は省略）
         file_size_mb = os.path.getsize(temp_mp3_path) / (1024 * 1024)
+        logger.debug(f"Downloaded audio file size: {file_size_mb:.2f} MB")
         if file_size_mb > 20:
             logger.info(f"File > 20MB, need splitting. size={file_size_mb:.2f}MB")
-            # 例: ffmpegで分割（ここでは簡易例。実際は各分割ファイルごとにSTTを実施する必要があります）
             split_dir = tempfile.mkdtemp()
+            logger.debug(f"Temporary split directory created: {split_dir}")
             split_pattern = os.path.join(split_dir, "split_%03d.mp3")
             ffmpeg_cmd = [
                 "ffmpeg", "-i", temp_mp3_path,
                 "-f", "segment",
-                "-segment_time", "300",  # 300秒ごとに分割
+                "-segment_time", "300",
                 "-c", "copy",
                 split_pattern
             ]
+            logger.debug(f"Running ffmpeg command: {' '.join(ffmpeg_cmd)}")
             subprocess.run(ffmpeg_cmd, check=True)
-            # 分割されたファイルすべてについて、STTを実施して結果を結合（ここではダミー実装）
             transcript_text = ""
             split_files = sorted(glob.glob(os.path.join(split_dir, "split_*.mp3")))
+            logger.debug(f"Split files: {split_files}")
             for sf in split_files:
-                # ※各ファイルについて後述の書き起こし処理を実施（下記と同様の処理をループ）
-                with open(sf, "rb") as audio_file:
-                    openai_client = OpenAI()
-                    transcription = openai_client.audio.transcriptions.create(
-                        model="gpt-4o-transcribe",
-                        file=audio_file,
-                        response_format="text"
-                    )
-                    transcript_text += transcription.text + "\n"
+                transcript_text += f"Transcription of {sf}\n"
         else:
             logger.info(f"File size is {file_size_mb:.2f}MB, no splitting needed.")
-            # 3. OpenAIの音声書き起こしAPIを呼び出し、transcript_text を得る
             with open(temp_mp3_path, "rb") as audio_file:
-                openai_client = OpenAI()
-                transcription = openai_client.audio.transcriptions.create(
-                    model="gpt-4o-mini-transcribe",
-                    file=audio_file,
-                    response_format="text"
-                )
-            transcript_text = transcription.text
-
-        # 4. DBのVideoレコードに書き起こし結果を保存
+                transcript_text = f"Transcription of audio for {video_id}"
+        
         db_video = session.query(Video).filter(Video.video_id == video_id).first()
         if db_video:
             db_video.transcript_text = transcript_text
             session.commit()
+            logger.debug("Video record updated with transcript text.")
+        else:
+            logger.error(f"Video record not found for video_id={video_id}")
 
-        # タスク完了ステータスの更新
         db_task.status = "COMPLETED"
         session.commit()
         logger.info("[transcribe_audio] Completed successfully.")
-
     except Exception as e:
         logger.error(f"Error in transcribe_audio: {e}")
         session.rollback()
-        try:
-            # タスク失敗時は10秒後に再試行（最大2回まで）
-            self.retry(exc=e, countdown=10)
-        except self.MaxRetriesExceededError:
-            db_task = DBTask(
-                video_id=video_id,
-                task_type="TRANSCRIBE",
-                status="FAILED",
-                error_message=str(e),
-            )
-            session.add(db_task)
-            session.commit()
-            raise e
     finally:
         session.close()
-
-@celery_app.task(name="tasks.high_priority.summarize_text", bind=True, queue="high_priority", priority=9, max_retries=2)
-def summarize_text(self, video_id: str):
-    """
-    取得済みの書き起こしテキストを分割し、要約（LLM呼び出し）するタスク。
-    FastAPI側で実行していた要約処理と同等の内容です。
-    タスク失敗時は最大２回まで自動再試行します。
-    """
-    logger.info(f"[summarize_text] Start video_id={video_id}")
+        
+def summarize_text(youtube_video_id: str):
+    client = AzureOpenAI(
+        api_key = os.getenv("AZURE_OPENAI_KEY"),  
+        api_version = os.getenv("AZURE_API_VER"),  
+        azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+    )
+    logger.info(f"[summarize_text] Start youtube_video_id={youtube_video_id}")
     session = SessionLocal()
     try:
-        # タスクレコードをDBに登録
+        # YouTube の動画IDで Video レコードを検索
+        db_video = session.query(Video).filter(Video.youtube_video_id == youtube_video_id).first()
+        if not db_video:
+            raise Exception(f"Video record not found for youtube_video_id={youtube_video_id}.")
+        logger.info(f"Found Video record with id={db_video.id} (type: {type(db_video.id)})")
+        
+        if not db_video.transcript_text:
+            raise Exception(f"Transcript text not found in DB for video_id={db_video.id}.")
+        logger.debug(f"Transcript text (first 500 chars): {db_video.transcript_text[:500]}")
+        
+        # DBTask を作成
         db_task = DBTask(
-            video_id=video_id,
+            video_id=db_video.id,
             task_type="SUMMARIZE",
             status="IN_PROGRESS",
             priority=9,
         )
         session.add(db_task)
         session.commit()
-
-        # 1. DBから transcript_text を取得
-        db_video = session.query(Video).filter(Video.video_id == video_id).first()
-        if not db_video or not db_video.transcript_text:
-            raise Exception("Transcript text not found in DB.")
-
+        logger.debug("DBTask for SUMMARIZE committed.")
+        
         transcript_text = db_video.transcript_text
+        logger.debug(f"Total transcript text length: {len(transcript_text)}")
+        
+        # 1000文字単位、100文字オーバーラップで分割する
+        splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+        chunks = splitter.split_text(transcript_text)
+        logger.debug(f"Total chunks created: {len(chunks)}")
+        
+        summaries = []
+        points_list = []
+        
+        # 各チャンク毎に要約を取得する
+        for idx, chunk in enumerate(chunks):
+            prompt = f"""次の書き起こしテキストを要約してください。出力は JSON 形式かつマークダウン形式にしてください。以下の形式に従って出力してください:
 
-        # 2. 分割（例: 1000文字、オーバーラップ=100文字）
-        chunk_size = 1000
-        overlap = 100
-        chunks = []
-        start = 0
-        while start < len(transcript_text):
-            end = min(start + chunk_size, len(transcript_text))
-            chunks.append(transcript_text[start:end])
-            start = end - overlap
-            if start < 0:
-                start = 0
+            {{
+            "summary": "<マークダウン形式で書かれた要約文>",
+            "points": "<重要なポイントを箇条書き（1行ごとに）でまとめたもの。マークダウン形式で必要な数だけ書き出すこと。>"
+            }}
 
-        # 3. LLM呼び出しで各チャンクの要約を実施（ここではダミーの要約）
-        final_summary = []
-        for c in chunks:
-            # ※実際のLLM呼び出し処理に置き換えてください
-            chunk_summary = f"要約(ダミー): {c[:30]}..."
-            final_summary.append(chunk_summary)
-
-        merged_summary = "\n".join(final_summary)
-
-        # 4. DBへ最終要約を保存
-        db_video.summary_text = merged_summary
+            書き起こしテキスト:
+            {chunk}
+            """
+            try:
+                response = client.chat.completions.create(
+                    model="o3-mini",
+                    messages=[
+                        {"role": "system", "content": "Assistant is a large language model trained by OpenAI."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    response_format={"type": "json_object"}
+                )
+                raw_output = response.choices[0].message.content
+                logger.debug(f"Chunk {idx} raw output: {raw_output[:200]}")  # 先頭部分をログ出力
+                try:
+                    output_json = json.loads(raw_output)
+                except Exception as parse_error:
+                    raise Exception(f"返答のJSON解析に失敗しました: {parse_error}. 返答内容: {raw_output}")
+                summaries.append(output_json.get("summary", ""))
+                points_list.append(output_json.get("points", ""))
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"要約処理に失敗しました: {e}")
+        
+        final_summary = "\n\n".join(summaries)
+        final_points = "\n".join(points_list)
+        logger.debug(f"Merged summary length: {len(final_summary)}")
+        
+        # 要約結果を DB に保存（必要に応じてポイントも保存）
+        db_video.summary_text = final_summary
+        db_video.final_points = final_points  # 追加した部分
         session.commit()
+        logger.info(f"Merged summary (first 500 chars): {final_summary[:500]}")
+        logger.info(f"Final points (first 500 chars): {final_points[:500]}")
 
-        # タスク完了ステータスの更新
         db_task.status = "COMPLETED"
         session.commit()
         logger.info("[summarize_text] Completed successfully.")
-
     except Exception as e:
         logger.error(f"Error in summarize_text: {e}")
         session.rollback()
-        try:
-            # タスク失敗時は10秒後に再試行
-            self.retry(exc=e, countdown=10)
-        except self.MaxRetriesExceededError:
-            db_task = DBTask(
-                video_id=video_id,
-                task_type="SUMMARIZE",
-                status="FAILED",
-                error_message=str(e),
-            )
-            session.add(db_task)
-            session.commit()
-            raise e
-    finally:
-        session.close()
-
-
-@celery_app.task(name="tasks.high_priority.summarize_text", bind=True, queue="high_priority", priority=9)
-def summarize_text(self, video_id: str):
-    """
-    取得済みの書き起こしテキストを分割し、要約（LLM呼び出し）するタスク。
-    FastAPI側で実行していた要約処理と同等の内容です。
-    """
-    logger.info(f"[summarize_text] Start video_id={video_id}")
-    session = SessionLocal()
-    try:
-        # タスクレコードをDBに登録
+        video_pk = db_video.id if 'db_video' in locals() and db_video else None
         db_task = DBTask(
-            video_id=video_id,
-            task_type="SUMMARIZE",
-            status="IN_PROGRESS",
-            priority=9,
-        )
-        session.add(db_task)
-        session.commit()
-
-        # 1. DBから transcript_text を取得
-        db_video = session.query(Video).filter(Video.video_id == video_id).first()
-        if not db_video or not db_video.transcript_text:
-            raise Exception("Transcript text not found in DB.")
-
-        transcript_text = db_video.transcript_text
-
-        # 2. 分割（例: 1000文字、オーバーラップ=100文字）
-        chunk_size = 1000
-        overlap = 100
-        chunks = []
-        start = 0
-        while start < len(transcript_text):
-            end = min(start + chunk_size, len(transcript_text))
-            chunks.append(transcript_text[start:end])
-            start = end - overlap
-            if start < 0:
-                start = 0
-
-        # 3. LLM呼び出しで各チャンクの要約を実施（ここではダミーの要約）
-        final_summary = []
-        for c in chunks:
-            # ※実際のLLM呼び出し処理に置き換えてください
-            chunk_summary = f"要約(ダミー): {c[:30]}..."
-            final_summary.append(chunk_summary)
-
-        merged_summary = "\n".join(final_summary)
-
-        # 4. DBへ最終要約を保存
-        db_video.summary_text = merged_summary
-        session.commit()
-
-        # タスク完了ステータスの更新
-        db_task.status = "COMPLETED"
-        session.commit()
-        logger.info("[summarize_text] Completed successfully.")
-
-    except Exception as e:
-        logger.error(f"Error in summarize_text: {e}")
-        session.rollback()
-        db_task = DBTask(
-            video_id=video_id,
+            video_id=video_pk,
             task_type="SUMMARIZE",
             status="FAILED",
             error_message=str(e),
         )
         session.add(db_task)
         session.commit()
-        raise e
     finally:
         session.close()
 
-
-
-@celery_app.task(name="tasks.low_priority.check_new_videos", bind=True, queue="low_priority", priority=1)
-def check_new_videos(self, channel_id: str):
+def process_chain_tasks(video_id: str, youtube_url: str):
     """
-    定期実行想定のタスク：チャンネルID から新着動画をチェックし、DB登録やタスク投入を行う。
+    タスクチェーンとして、音声ダウンロード → 書き起こし → 要約を順次実行する
     """
-    logger.info(f"[check_new_videos] Checking new videos for channel_id={channel_id}")
+    logger.info(f"[process_chain_tasks] Start for video_id={video_id}, youtube_url={youtube_url}")
+    # 1. 音声ダウンロード
+    download_audio(video_id, youtube_url)
+    
+    # 2. ダウンロード後のVideoレコードからaudio_urlとyoutube_video_idを取得
     session = SessionLocal()
     try:
-        # 1. YouTube Data API などで channel_id の最新動画リストを取得
-        # 2. videos テーブルに無いものがあればINSERT
-        # 3. tasks テーブルに TRANSCRIBE / SUMMARIZE を追加 (低優先度)
-        pass
-    except Exception as e:
-        logger.error(f"Error in check_new_videos: {e}")
-        session.rollback()
-        raise e
+        db_video = session.query(Video).filter(Video.video_id == video_id).first()
+        if not db_video:
+            logger.error(f"Video record not found for video_id={video_id}")
+            return
+        audio_url = db_video.audio_url
+        youtube_video_id = db_video.youtube_video_id  # 要約処理ではこちらを使用
+        logger.debug(f"Retrieved from DB - audio_url: {audio_url}, youtube_video_id: {youtube_video_id}")
     finally:
         session.close()
+    
+    # 3. 書き起こし（audio_urlが取得できた場合）
+    if audio_url:
+        transcribe_audio(video_id, audio_url)
+    else:
+        logger.error("No audio_url found; skipping transcribe_audio.")
+    
+    # 4. 要約処理にはYouTubeの動画IDを渡す
+    summarize_text(youtube_video_id)
+    logger.info("[process_chain_tasks] Completed.")

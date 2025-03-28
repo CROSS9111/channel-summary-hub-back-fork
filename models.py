@@ -1,13 +1,14 @@
 import os
 from dotenv import load_dotenv
 from sqlalchemy import (
-    Column, BigInteger, String, Text, DateTime, ForeignKey, Integer,
-    UniqueConstraint, func
+    Enum, Column, BigInteger, String, Text, DateTime, ForeignKey, Integer,
+    func
 )
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 from sqlalchemy import create_engine
+from datetime import datetime
 
-load_dotenv()  # .envから読み込み
+load_dotenv(".env.local", override=True)
 
 DB_HOST = os.getenv("DB_HOST", "localhost")
 DB_USER = os.getenv("DB_USER", "root")
@@ -47,11 +48,20 @@ class Channel(Base):
 
 
 class Video(Base):
+    """
+    YouTube の動画IDを 'youtube_video_id' カラムに保存する想定。
+    'id' は内部DB用の主キー（AUTO_INCREMENT）。
+    """
     __tablename__ = "videos"
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
+    user_id = Column(BigInteger, ForeignKey("users.id"), nullable=True)  # ユーザーとの紐付け用カラム
     channel_id = Column(BigInteger, ForeignKey("channels.id"), nullable=False)
-    video_id = Column(String(255), unique=True, nullable=False)
+
+
+    # YouTube の動画IDをここに保存
+    youtube_video_id = Column(String(255), unique=True, nullable=False)
+
     title = Column(String(255))
     description = Column(Text)
     published_at = Column(DateTime)
@@ -62,13 +72,34 @@ class Video(Base):
     thumbnail_high = Column(String(255))
     transcript_text = Column(Text)   # LONGTEXTにしてもOK
     summary_text = Column(Text)      # 同上
+    final_points = Column(Text)  # 追加したカラム
 
     created_at = Column(DateTime, server_default=func.current_timestamp())
     updated_at = Column(DateTime, server_default=func.current_timestamp(), onupdate=func.current_timestamp())
 
-    # リレーション
-    tasks = relationship("Task", back_populates="video")
+    tasks = relationship("DBTask", back_populates="video")
     channel = relationship("Channel")
+
+
+class DBTask(Base):
+    __tablename__ = 'tasks'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    # Video の主キー(id)を参照
+    video_id = Column(BigInteger, ForeignKey('videos.id'), nullable=False)
+
+    task_type = Column(Enum('DOWNLOAD_AUDIO', 'TRANSCRIBE', 'SUMMARIZE'), nullable=False)
+    status = Column(Enum('PENDING', 'IN_PROGRESS', 'COMPLETED', 'FAILED'), default='PENDING', nullable=False)
+    retries = Column(Integer, default=0)
+    priority = Column(Integer, default=0)
+    scheduled_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    started_at = Column(DateTime)
+    completed_at = Column(DateTime)
+    error_message = Column(Text)
+    result_data = Column(Text)
+
+    video = relationship("Video", back_populates="tasks")
 
 
 class UserChannel(Base):
@@ -77,22 +108,3 @@ class UserChannel(Base):
     user_id = Column(BigInteger, ForeignKey("users.id"), primary_key=True)
     channel_id = Column(BigInteger, ForeignKey("channels.id"), primary_key=True)
     created_at = Column(DateTime, server_default=func.current_timestamp())
-
-
-class Task(Base):
-    __tablename__ = "tasks"
-
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
-    video_id = Column(BigInteger, ForeignKey("videos.id"), nullable=False)
-    task_type = Column(String(50), nullable=False)
-    status = Column(String(20), nullable=False)
-    retries = Column(Integer, default=0)
-    priority = Column(Integer, default=0)
-    scheduled_at = Column(DateTime)
-    created_at = Column(DateTime, server_default=func.current_timestamp())
-    started_at = Column(DateTime)
-    completed_at = Column(DateTime)
-    error_message = Column(Text)
-    result_data = Column(Text)  # 必要に応じてJSONなど格納
-
-    video = relationship("Video", back_populates="tasks")
