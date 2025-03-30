@@ -12,11 +12,11 @@ DB_CONFIG = {
     "database": os.getenv("DB_NAME", "mydatabase"),
 }
 
-# CREATE TABLE のクエリ（videos テーブルに user_id カラムを追加）
+# CREATE TABLE のクエリ（users テーブルを UUID 主キーに変更し、videos テーブルの user_id も CHAR(36) に変更）
 CREATE_TABLE_QUERIES = [
     """
     CREATE TABLE IF NOT EXISTS `users` (
-      `id` BIGINT AUTO_INCREMENT PRIMARY KEY,
+      `id` CHAR(36) PRIMARY KEY,
       `username` VARCHAR(255) NOT NULL UNIQUE,
       `password_hash` VARCHAR(255) NOT NULL,
       `email` VARCHAR(255) UNIQUE,
@@ -37,7 +37,7 @@ CREATE_TABLE_QUERIES = [
     """
     CREATE TABLE IF NOT EXISTS `videos` (
       `id` BIGINT AUTO_INCREMENT PRIMARY KEY,
-      `user_id` BIGINT, 
+      `user_id` CHAR(36), 
       `channel_id` BIGINT NOT NULL,
       `youtube_video_id` VARCHAR(255) NOT NULL UNIQUE,
       `title` VARCHAR(255),
@@ -65,7 +65,7 @@ CREATE_TABLE_QUERIES = [
     """,
     """
     CREATE TABLE IF NOT EXISTS `user_channels` (
-      `user_id` BIGINT NOT NULL,
+      `user_id` CHAR(36) NOT NULL,
       `channel_id` BIGINT NOT NULL,
       `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
       PRIMARY KEY (`user_id`, `channel_id`),
@@ -126,15 +126,16 @@ def init_db():
         conn.commit()
         print("All tables have been created successfully.")
 
-        # ダミーユーザーの登録（適当なユーザー名、パスワードハッシュ、メールを設定）
+        # ダミーユーザーの登録（UUID を指定）
+        dummy_user_id = "1558c67b-8562-4fed-ae17-cc38dff7bf9d"
         dummy_username = "dummy_user"
         dummy_password_hash = "dummy_hash"  # 実際はハッシュ化されたパスワードを保存する
         dummy_email = "dummy@example.com"
         insert_user_sql = """
-            INSERT INTO `users` (username, password_hash, email)
-            VALUES (%s, %s, %s)
+            INSERT INTO `users` (id, username, password_hash, email)
+            VALUES (%s, %s, %s, %s)
         """
-        cursor.execute(insert_user_sql, (dummy_username, dummy_password_hash, dummy_email))
+        cursor.execute(insert_user_sql, (dummy_user_id, dummy_username, dummy_password_hash, dummy_email))
         conn.commit()
         print("Dummy user has been registered successfully.")
     finally:

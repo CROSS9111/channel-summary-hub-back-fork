@@ -28,7 +28,7 @@ Base = declarative_base()
 class User(Base):
     __tablename__ = "users"
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(String(36), primary_key=True, autoincrement=True)
     username = Column(String(255), unique=True, nullable=False)
     password_hash = Column(String(255), nullable=False)
     email = Column(String(255), unique=True)
@@ -55,7 +55,7 @@ class Video(Base):
     __tablename__ = "videos"
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
-    user_id = Column(BigInteger, ForeignKey("users.id"), nullable=True)  # ユーザーとの紐付け用カラム
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=True)  # ユーザーとの紐付け用カラム
     channel_id = Column(BigInteger, ForeignKey("channels.id"), nullable=False)
 
     # YouTube の動画IDをここに保存
@@ -104,6 +104,6 @@ class DBTask(Base):
 class UserChannel(Base):
     __tablename__ = "user_channels"
 
-    user_id = Column(BigInteger, ForeignKey("users.id"), primary_key=True)
+    user_id = Column(String(36), ForeignKey("users.id"), primary_key=True)
     channel_id = Column(BigInteger, ForeignKey("channels.id"), primary_key=True)
     created_at = Column(DateTime, server_default=func.current_timestamp())

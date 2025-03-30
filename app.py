@@ -210,7 +210,7 @@ def summarize_youtube(request: SummaryRequest):
     )
 
 @app.get("/users/{user_id}/summaries", response_model=UserSummariesResponse)
-def get_user_summaries(user_id: int):
+def get_user_summaries(user_id: str):
     session: Session = SessionLocal()
     try:
         # ユーザーIDでユーザーを取得
