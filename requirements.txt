@@ -11,3 +11,4 @@ mysql-connector-python
 redis
 psycopg2-binary
 gunicorn
+python-dateutil
