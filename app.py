@@ -270,12 +270,16 @@ def summarize_youtube(request: SummaryRequest):
         transcript_text = " ".join([item["text"] for item in transcript_list])
         db_video.transcript_text = transcript_text
         session.commit()
+    except Exception as e:
+        print(f"DEBUG: 字幕保存に失敗: {e}")
 
+
+    try:
         # 字幕が取得できた場合は、要約タスクを Redis に登録
         redis_task_queue.add_task("summarize_text", "high", db_video.youtube_video_id)
         response_message = "字幕が取得され、要約タスクを投入しました。"
     except Exception as e:
-        print(f"DEBUG: 字幕取得に失敗: {e}")
+        print(f"DEBUG: 字幕取得に失敗: {e}") 
         # 字幕が取得できなかった場合は、音声取得タスクを登録
         redis_task_queue.add_task("download_audio", "high", db_video.id, youtube_url)
         response_message = "字幕が取得できなかったため、音声取得タスクを投入しました。"
