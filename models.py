@@ -6,35 +6,49 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 from sqlalchemy import create_engine
+from sqlalchemy.dialects.postgresql import BIGINT, UUID,JSONB
 from datetime import datetime
 
 load_dotenv(".env.local", override=True)
 
-DB_HOST = os.getenv("DB_HOST", "localhost")
-DB_USER = os.getenv("DB_USER", "root")
-DB_PASSWORD = os.getenv("DB_PASSWORD", "")
-DB_NAME = os.getenv("DB_NAME", "mydatabase")
+##MySQL
+# DB_HOST = os.getenv("DB_HOST", "localhost")
+# DB_USER = os.getenv("DB_USER", "root")
+# DB_PASSWORD = os.getenv("DB_PASSWORD", "")
+# DB_NAME = os.getenv("DB_NAME", "mydatabase")
 
-SQLALCHEMY_DATABASE_URL = (
-    f"mysql+mysqlconnector://{DB_USER}:{DB_PASSWORD}@{DB_HOST}/{DB_NAME}"
-)
+#Supabase
+USER = os.getenv("user")
+PASSWORD = os.getenv("password")
+HOST = os.getenv("host")
+PORT = os.getenv("port")
+DBNAME = os.getenv("dbname")
 
-engine = create_engine(SQLALCHEMY_DATABASE_URL, echo=False)
+# Supabaseの接続情報（環境変数から取得するのが望ましい）
+DATABASE_URL = f"postgresql+psycopg2://{USER}:{PASSWORD}@{HOST}:{PORT}/{DBNAME}?sslmode=require"
+
+engine = create_engine(DATABASE_URL, echo=False)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 Base = declarative_base()
 
-
 class User(Base):
     __tablename__ = "users"
+    __table_args__ = {"schema": "auth"}
 
-    id = Column(String(36), primary_key=True, autoincrement=True)
-    username = Column(String(255), unique=True, nullable=False)
-    password_hash = Column(String(255), nullable=False)
-    email = Column(String(255), unique=True)
-    created_at = Column(DateTime, server_default=func.current_timestamp())
-    updated_at = Column(DateTime, server_default=func.current_timestamp(), onupdate=func.current_timestamp())
+    id = Column(UUID(as_uuid=True), primary_key=True, index=True)
+    # username = Column(String(255), unique=True, index=True, nullable=False)
+    email = Column(String(255), unique=True, index=True, nullable=True)
+    # app_metadata = Column(JSONB, nullable=False, default=dict)
+    # user_metadata = Column(JSONB, nullable=False, default=dict)
+    # identities = Column(JSONB, nullable=False, default=list)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    # updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
+    @property
+    def username(self):
+        # 例えば、user_metadata に "username" キーが存在する場合に取得
+        return self.user_metadata.get("username")
 
 class Channel(Base):
     __tablename__ = "channels"
@@ -42,25 +56,24 @@ class Channel(Base):
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     channel_id = Column(String(255), unique=True, nullable=False)
     channel_name = Column(String(255))
-    last_checked = Column(DateTime)
-    created_at = Column(DateTime, server_default=func.current_timestamp())
-    updated_at = Column(DateTime, server_default=func.current_timestamp(), onupdate=func.current_timestamp())
-
-
+    channel_description = Column(Text)
+    channel_thumbnail_url = Column(String(255))
+    subscriber_count = Column(BigInteger)
+    video_count = Column(BigInteger)
+    view_count = Column(BigInteger)
+    published_at = Column(DateTime(timezone=True))
+    last_checked = Column(DateTime(timezone=True))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    
+#Supabase版
 class Video(Base):
-    """
-    YouTube の動画IDを 'youtube_video_id' カラムに保存する想定。
-    'id' は内部DB用の主キー（AUTO_INCREMENT）。
-    """
     __tablename__ = "videos"
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
-    user_id = Column(String(36), ForeignKey("users.id"), nullable=True)  # ユーザーとの紐付け用カラム
-    channel_id = Column(BigInteger, ForeignKey("channels.id"), nullable=False)
-
-    # YouTube の動画IDをここに保存
+    id = Column(BIGINT, primary_key=True, autoincrement=True)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("auth.users.id"), nullable=True)
+    channel_id = Column(BIGINT, ForeignKey("channels.id"), nullable=False)
     youtube_video_id = Column(String(255), unique=True, nullable=False)
-
     title = Column(String(255))
     description = Column(Text)
     published_at = Column(DateTime)
@@ -69,15 +82,13 @@ class Video(Base):
     thumbnail_default = Column(String(255))
     thumbnail_medium = Column(String(255))
     thumbnail_high = Column(String(255))
-    transcript_text = Column(Text)   # LONGTEXTにしてもOK
-    summary_text = Column(Text)      # 同上
-    final_points = Column(Text)  # 追加したカラム
+    transcript_text = Column(Text)
+    summary_text = Column(Text)
+    final_points = Column(Text)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
-    created_at = Column(DateTime, server_default=func.current_timestamp())
-    updated_at = Column(DateTime, server_default=func.current_timestamp(), onupdate=func.current_timestamp())
-
-    tasks = relationship("DBTask", back_populates="video")
-    channel = relationship("Channel")
+    tasks = relationship("DBTask", back_populates="video", cascade="all, delete-orphan")
 
 
 class DBTask(Base):
@@ -99,11 +110,11 @@ class DBTask(Base):
     result_data = Column(Text)
 
     video = relationship("Video", back_populates="tasks")
-
+    # Task（または DBTask）とのリレーションを追加
 
 class UserChannel(Base):
     __tablename__ = "user_channels"
 
-    user_id = Column(String(36), ForeignKey("users.id"), primary_key=True)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("auth.users.id"), primary_key=True)
     channel_id = Column(BigInteger, ForeignKey("channels.id"), primary_key=True)
     created_at = Column(DateTime, server_default=func.current_timestamp())

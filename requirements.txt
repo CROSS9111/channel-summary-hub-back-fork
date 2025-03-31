@@ -9,3 +9,4 @@ azure-storage-blob
 sqlalchemy
 mysql-connector-python
 redis
+psycopg2-binary
