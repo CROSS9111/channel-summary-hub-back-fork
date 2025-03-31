@@ -18,11 +18,11 @@ load_dotenv(".env.local", override=True)
 # DB_NAME = os.getenv("DB_NAME", "mydatabase")
 
 #Supabase
-USER = os.getenv("user")
-PASSWORD = os.getenv("password")
-HOST = os.getenv("host")
-PORT = os.getenv("port")
-DBNAME = os.getenv("dbname")
+USER = os.getenv("sb_user")
+PASSWORD = os.getenv("sb_password")
+HOST = os.getenv("sb_host")
+PORT = os.getenv("sb_port")
+DBNAME = os.getenv("sb_dbname")
 
 # Supabaseの接続情報（環境変数から取得するのが望ましい）
 DATABASE_URL = f"postgresql+psycopg2://{USER}:{PASSWORD}@{HOST}:{PORT}/{DBNAME}?sslmode=require"
