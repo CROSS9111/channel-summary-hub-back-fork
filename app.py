@@ -222,23 +222,23 @@ def summarize_youtube(request: SummaryRequest):
     youtube_url = request.youtube_url
     userId = request.userId
     video_id = extract_video_id(youtube_url)
-
+    
     if not video_id:
         raise HTTPException(status_code=400, detail="動画IDが抽出できませんでした。URLを確認してください。")
-
+    
     try:
         video_details = get_video_details(video_id)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"動画詳細の取得に失敗: {e}")
-
+    
     session = SessionLocal()
-
+    
     # チャンネル情報の取得・登録
     channel_youtube_id = video_details["snippet"].get("channelId", "")
     if not channel_youtube_id:
         session.close()
         raise HTTPException(status_code=400, detail="チャンネルIDが取得できませんでした。")
-
+    
     channel = session.query(Channel).filter(Channel.channel_id == channel_youtube_id).first()
     if not channel:
         channel = Channel(
@@ -247,7 +247,7 @@ def summarize_youtube(request: SummaryRequest):
         )
         session.add(channel)
         session.commit()
-
+    
     # Video レコード作成（User の主キーも紐付ける）
     db_video = session.query(Video).filter(Video.youtube_video_id == video_id).first()
     if not db_video:
@@ -266,18 +266,30 @@ def summarize_youtube(request: SummaryRequest):
         )
         session.add(db_video)
         session.commit()
-
+    
     try:
+        # プロキシ設定
+        proxy_handler = {
+            'https': os.getenv('HTTPS_PROXY', 'https://your-proxy-server:port'),
+            'http': os.getenv('HTTP_PROXY', 'http://your-proxy-server:port')
+        }
+        
+        # YouTubeTranscriptApiにプロキシ設定を適用するためのカスタムリクエスト関数
+        def make_request_through_proxy(url):
+            session = requests.Session()
+            session.proxies.update(proxy_handler)
+            response = session.get(url)
+            return response.text
+        
         # 字幕取得（優先言語: 日本語, 英語）
+        # カスタムリクエスト関数を使用してYouTubeTranscriptApiを初期化
+        YouTubeTranscriptApi._make_request = make_request_through_proxy
         transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=["ja", "en"])
         transcript_text = " ".join([item["text"] for item in transcript_list])
         db_video.transcript_text = transcript_text
         logger.debug(f"Transcript text: {transcript_text}")
         session.commit()
-    except Exception as e:
-        logger.warning(f"DEBUG: 字幕保存に失敗: {e}")
-
-    try:
+        
         # 字幕が取得できた場合は、要約タスクを Redis に登録
         redis_task_queue.add_task("summarize_text", "high", db_video.youtube_video_id)
         response_message = "字幕が取得され、要約タスクを投入しました。"
@@ -286,9 +298,9 @@ def summarize_youtube(request: SummaryRequest):
         # 字幕が取得できなかった場合は、音声取得タスクを登録
         redis_task_queue.add_task("download_audio", "high", db_video.id, youtube_url)
         response_message = "字幕が取得できなかったため、音声取得タスクを投入しました。"
-
+    
     session.close()
-
+    
     return SummaryResponse(
         summary=response_message,
         points="",
