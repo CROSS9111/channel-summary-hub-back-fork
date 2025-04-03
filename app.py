@@ -269,6 +269,7 @@ def summarize_youtube(request: SummaryRequest):
         transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=["ja", "en"])
         transcript_text = " ".join([item["text"] for item in transcript_list])
         db_video.transcript_text = transcript_text
+        print("transcript_text",transcript_text)
         session.commit()
     except Exception as e:
         print(f"DEBUG: 字幕保存に失敗: {e}")
