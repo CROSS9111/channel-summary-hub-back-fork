@@ -266,7 +266,7 @@ def summarize_youtube(request: SummaryRequest):
 
     try:
         # 字幕取得（優先言語: 日本語, 英語）
-        transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=["ja"])
+        transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=["ja, en"])
         transcript_text = " ".join([item["text"] for item in transcript_list])
         db_video.transcript_text = transcript_text
         print("transcript_text",transcript_text)
