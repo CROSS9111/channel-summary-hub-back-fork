@@ -21,7 +21,7 @@ from openai import AzureOpenAI
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.DEBUG)  # DEBUGレベルも出力する
 
-def download_audio(video_id: str, youtube_url: str):
+def download_audio(video_id: int, youtube_url: str):
     logger.info(f"[download_audio] Start video_id={video_id}, youtube_url={youtube_url}")
     session = SessionLocal()
     try:
@@ -77,7 +77,7 @@ def download_audio(video_id: str, youtube_url: str):
                 blob_client.upload_blob(audio_data, overwrite=True)
                 logger.debug("Audio file uploaded.")
 
-        db_video = session.query(Video).filter(Video.video_id == video_id).first()
+        db_video = session.query(Video).filter(Video.id == video_id).first()
         if db_video:
             db_video.audio_url = blob_client.url
             session.commit()
@@ -94,7 +94,7 @@ def download_audio(video_id: str, youtube_url: str):
     finally:
         session.close()
 
-def transcribe_audio(video_id: str, audio_url: str):
+def transcribe_audio(video_id: int, audio_url: str):
     logger.info(f"[transcribe_audio] Start video_id={video_id}, audio_url={audio_url}")
     session = SessionLocal()
     try:
@@ -151,7 +151,7 @@ def transcribe_audio(video_id: str, audio_url: str):
             with open(temp_mp3_path, "rb") as audio_file:
                 transcript_text = f"Transcription of audio for {video_id}"
         
-        db_video = session.query(Video).filter(Video.video_id == video_id).first()
+        db_video = session.query(Video).filter(Video.id == video_id).first()
         if db_video:
             db_video.transcript_text = transcript_text
             session.commit()
@@ -270,7 +270,7 @@ def summarize_text(youtube_video_id: str):
     finally:
         session.close()
 
-def process_chain_tasks(video_id: str, youtube_url: str):
+def process_chain_tasks(video_id: int, youtube_url: str):
     """
     タスクチェーンとして、音声ダウンロード → 書き起こし → 要約を順次実行する
     """
@@ -281,7 +281,7 @@ def process_chain_tasks(video_id: str, youtube_url: str):
     # 2. ダウンロード後のVideoレコードからaudio_urlとyoutube_video_idを取得
     session = SessionLocal()
     try:
-        db_video = session.query(Video).filter(Video.video_id == video_id).first()
+        db_video = session.query(Video).filter(Video.id == video_id).first()
         if not db_video:
             logger.error(f"Video record not found for video_id={video_id}")
             return

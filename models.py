@@ -82,6 +82,7 @@ class Video(Base):
     thumbnail_default = Column(String(255))
     thumbnail_medium = Column(String(255))
     thumbnail_high = Column(String(255))
+    audio_url = Column(String, nullable=True)
     transcript_text = Column(Text)
     summary_text = Column(Text)
     final_points = Column(Text)

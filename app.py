@@ -19,18 +19,14 @@ from sqlalchemy.orm import Session
 
 # 先ほど作成した RedisTaskQueue クラスをインポート
 from redis_queue import RedisTaskQueue
-import yt_dlp
-import re
 
-
-# .env.local を優先して読み込み
 load_dotenv(".env.local", override=True)
 
 # ロギング設定（DEBUG レベルのログをコンソール出力）
 logging.basicConfig(level=logging.DEBUG, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger(__name__)
 
 app = FastAPI()
+
 
 # DBセッションの依存関係
 def get_db():
@@ -43,13 +39,13 @@ def get_db():
 # CORS ミドルウェアの追加（必要に応じて allow_origins 等を設定）
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:8080/", "*"],  # 全オリジンを許可（本番環境では制限を推奨）
+    allow_origins=["http://localhost:8080/","*"],  # 全オリジンを許可（本番環境では制限を設けることを推奨）
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# RedisTaskQueue インスタンスを作成（環境変数からホスト名などを取得）
+# RedisTaskQueue インスタンスの作成（環境変数からホスト名を取得）
 redis_task_queue = RedisTaskQueue(
     redis_host=os.getenv("REDIS_HOST", "localhost"),
     redis_port=int(os.getenv("REDIS_PORT", "6379")),
@@ -57,7 +53,7 @@ redis_task_queue = RedisTaskQueue(
     redis_password=os.getenv("REDIS_PASSWORD")
 )
 
-logger.debug(f"redis_host={os.getenv('REDIS_HOST', 'localhost')}")
+print("redis_host",os.getenv("REDIS_HOST", "localhost"))
 
 # ユーザー名を含めるようにリクエストモデルを修正
 class SummaryRequest(BaseModel):
@@ -75,21 +71,22 @@ class VideoSummary(BaseModel):
     summary_date: str
     channel_name: str
     thumbnail_high: str
-    channel_id: str
-    updated_at: datetime
-    summary: str
-    keyPoints: str
+    channel_id:str
+    updated_at:datetime
+    summary:str
+    keyPoints:str  
 
 class UserSummariesResponse(BaseModel):
     userId: str
     summaries: list[VideoSummary]
 
-# チャンネル向けのレスポンスモデル
+# 追加：チャンネル向けのレスポンスモデル
 class ChannelSummariesResponse(BaseModel):
     channel_name: str
     summaries: list[VideoSummary]
 
 # --- POST エンドポイント: ユーザーとチャンネルの紐付け（UserChannel の作成） ---
+
 class UserChannelCreate(BaseModel):
     user_id: str  # UUID を文字列として受け取る
     channel_id: str
@@ -139,7 +136,7 @@ def get_video_details(video_id: str) -> dict:
     API_KEY = os.getenv("YOUTUBE_API_KEY")
     if not API_KEY:
         raise Exception("YOUTUBE_API_KEY が設定されていません。")
-
+        
     url = "https://www.googleapis.com/youtube/v3/videos"
     params = {
         "part": "snippet",
@@ -152,13 +149,13 @@ def get_video_details(video_id: str) -> dict:
     data = response.json()
     if not data.get("items"):
         raise Exception("動画の詳細情報が取得できませんでした。")
-
+    
     snippet = data["items"][0]["snippet"]
-
+    
     # publishedAt の ISO8601 形式を datetime オブジェクトに変換
     published_at_str = snippet.get("publishedAt", "")
     if published_at_str:
-        # dateutil.parser.parse を利用すると "Z" も処理可能
+        # dateutil.parser.parse を利用すると "Z" も処理可能です
         published_at_dt = dateutil.parser.parse(published_at_str)
         # MySQL 用にフォーマットを変更（例: 'YYYY-MM-DD HH:MM:SS'）
         published_at = published_at_dt.strftime("%Y-%m-%d %H:%M:%S")
@@ -183,10 +180,8 @@ def get_video_details(video_id: str) -> dict:
         }
     }
 
+    # YouTubeからチャンネル詳細を取得する関数
 def fetch_channel_details(channel_id: str):
-    """
-    YouTube Data API からチャンネルの詳細情報を取得する関数
-    """
     API_KEY = os.getenv("YOUTUBE_API_KEY")
     url = "https://www.googleapis.com/youtube/v3/channels"
     params = {
@@ -202,6 +197,7 @@ def fetch_channel_details(channel_id: str):
         raise ValueError("チャンネルが見つかりませんでした。")
 
     item = data["items"][0]
+
     snippet = item["snippet"]
     stats = item["statistics"]
 
@@ -224,46 +220,15 @@ def status_check():
 def summarize_youtube(request: SummaryRequest):
     youtube_url = request.youtube_url
     userId = request.userId
+    video_id = extract_video_id(youtube_url)
+    if not video_id:
+        raise HTTPException(status_code=400, detail="動画IDが抽出できませんでした。URLを確認してください。")
     
     try:
-        # yt-dlpを使用してビデオ情報を取得
-        ydl_opts = {
-            'quiet': True,
-            'no_warnings': True,
-            'writesubtitles': True,
-            'writeautomaticsub': True,
-            'skip_download': True,
-        }
-        
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(youtube_url, download=False)
-            
-        if not info:
-            raise HTTPException(status_code=400, detail="動画情報が取得できませんでした。URLを確認してください。")
-            
-        video_id = info.get('id')
-        if not video_id:
-            raise HTTPException(status_code=400, detail="動画IDが抽出できませんでした。URLを確認してください。")
-            
-        # video_detailsをyt-dlpの結果から作成
-        video_details = {
-            "snippet": {
-                "channelId": info.get('channel_id', ''),
-                "channelTitle": info.get('channel', ''),
-                "title": info.get('title', ''),
-                "description": info.get('description', ''),
-                "publishedAt": info.get('upload_date', ''),
-                "thumbnails": {
-                    "default": {"url": info.get('thumbnail', '')},
-                    "medium": {"url": info.get('thumbnail', '')},
-                    "high": {"url": info.get('thumbnail', '')}
-                }
-            }
-        }
-        
+        video_details = get_video_details(video_id)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"動画詳細の取得に失敗: {e}")
-
+    
     session = SessionLocal()
 
     # チャンネル情報の取得・登録
@@ -271,7 +236,6 @@ def summarize_youtube(request: SummaryRequest):
     if not channel_youtube_id:
         session.close()
         raise HTTPException(status_code=400, detail="チャンネルIDが取得できませんでした。")
-
     channel = session.query(Channel).filter(Channel.channel_id == channel_youtube_id).first()
     if not channel:
         channel = Channel(
@@ -280,12 +244,12 @@ def summarize_youtube(request: SummaryRequest):
         )
         session.add(channel)
         session.commit()
-
+    
     # Video レコード作成（User の主キーも紐付ける）
     db_video = session.query(Video).filter(Video.youtube_video_id == video_id).first()
     if not db_video:
         db_video = Video(
-            user_id=userId,
+            user_id=userId,  # ここでユーザー情報を紐付け
             channel_id=channel.id,
             youtube_video_id=video_id,
             title=video_details["snippet"].get("title", ""),
@@ -300,47 +264,20 @@ def summarize_youtube(request: SummaryRequest):
         session.add(db_video)
         session.commit()
 
-    # 字幕の取得を試みる
     try:
-        transcript_text = ""
-        # yt-dlpで利用可能な字幕一覧を取得
-        available_subtitles = info.get('subtitles', {})
-        automatic_subtitles = info.get('automatic_captions', {})
-        
-        # 優先順位: 日本語の手動字幕 -> 英語の手動字幕 -> 日本語の自動字幕 -> 英語の自動字幕
-        subtitle_text = None
-        
-        # 手動字幕の確認
-        if 'ja' in available_subtitles and available_subtitles['ja']:
-            subtitle_url = available_subtitles['ja'][0]['url']
-            subtitle_text = _download_and_parse_subtitle(subtitle_url)
-        elif 'en' in available_subtitles and available_subtitles['en']:
-            subtitle_url = available_subtitles['en'][0]['url']
-            subtitle_text = _download_and_parse_subtitle(subtitle_url)
-        # 自動字幕の確認
-        elif 'ja' in automatic_subtitles and automatic_subtitles['ja']:
-            subtitle_url = automatic_subtitles['ja'][0]['url']
-            subtitle_text = _download_and_parse_subtitle(subtitle_url)
-        elif 'en' in automatic_subtitles and automatic_subtitles['en']:
-            subtitle_url = automatic_subtitles['en'][0]['url']
-            subtitle_text = _download_and_parse_subtitle(subtitle_url)
-            
-        if subtitle_text:
-            db_video.transcript_text = subtitle_text
-            session.commit()
-            
-            # 字幕が取得できた場合は、要約タスクを Redis に登録
-            redis_task_queue.add_task("summarize_text", "high", db_video.youtube_video_id)
-            response_message = "字幕が取得され、要約タスクを投入しました。"
-        else:
-            # 字幕が取得できなかった場合は、音声取得タスクを登録
-            redis_task_queue.add_task("download_audio", "high", db_video.id, youtube_url)
-            response_message = "字幕が取得できなかったため、音声取得タスクを投入しました。"
-            
+        # 字幕取得（優先言語: 日本語, 英語）
+        transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=["ja"])
+        transcript_text = " ".join([item["text"] for item in transcript_list])
+        db_video.transcript_text = transcript_text
+        print("transcript_text",transcript_text)
+        session.commit()
+        # 字幕が取得できた場合は、要約タスクを Redis に登録
+        redis_task_queue.add_task("summarize_text", "high", db_video.youtube_video_id)
+        response_message = "字幕が取得され、要約タスクを投入しました。"
     except Exception as e:
-        logger.warning(f"DEBUG: 字幕取得に失敗: {e}")
+        print(f"DEBUG: 字幕取得に失敗: {e}") 
         # 字幕が取得できなかった場合は、音声取得タスクを登録
-        redis_task_queue.add_task("download_audio", "high", db_video.id, youtube_url)
+        redis_task_queue.add_task("process_chain_tasks", "high", db_video.id, youtube_url)
         response_message = "字幕が取得できなかったため、音声取得タスクを投入しました。"
 
     session.close()
@@ -351,80 +288,6 @@ def summarize_youtube(request: SummaryRequest):
         video_details=video_details
     )
 
-def _download_and_parse_subtitle(subtitle_url):
-    try:
-        response = requests.get(subtitle_url)
-        if response.status_code == 200:
-            subtitle_content = response.text
-            content_type = response.headers.get('Content-Type', '').lower()
-
-            # Content-Type に 'json' が含まれていれば JSON とみなす
-            if 'json' in content_type:
-                try:
-                    subtitle_json = json.loads(subtitle_content)
-                    # JSONパース後の処理
-                    return _parse_json_subtitle(subtitle_json)
-                except json.JSONDecodeError:
-                    # JSON と判断したがパースに失敗した場合、素のテキストを返す
-                    return subtitle_content
-
-            # Content-Type に 'text/vtt' が含まれていれば VTT とみなす
-            if 'text/vtt' in content_type:
-                return _parse_vtt_subtitle(subtitle_content)
-
-            # 上記に該当しない場合は拡張子で判定する(後方互換用)
-            if subtitle_url.endswith('.vtt'):
-                return _parse_vtt_subtitle(subtitle_content)
-            elif subtitle_url.endswith('.json'):
-                try:
-                    subtitle_json = json.loads(subtitle_content)
-                    return _parse_json_subtitle(subtitle_json)
-                except json.JSONDecodeError:
-                    return subtitle_content
-
-            # いずれにも該当しなければ、そのまま返す
-            return subtitle_content
-
-    except Exception as e:
-        logger.error(f"字幕のダウンロードまたはパースに失敗: {e}")
-    return ""
-
-def _parse_vtt_subtitle(subtitle_content):
-    lines = subtitle_content.split('\n')
-    text_lines = []
-    for line in lines:
-        # タイムスタンプ行や空行、メタデータ行をスキップ
-        if re.match(r'\d{2}:\d{2}:\d{2}', line):
-            continue
-        if not line.strip():
-            continue
-        if line.startswith('WEBVTT'):
-            continue
-        text_lines.append(line.strip())
-    return ' '.join(text_lines)
-
-def _parse_json_subtitle(subtitle_json):
-    if 'events' not in subtitle_json:
-        # events がなければそのまま
-        return json.dumps(subtitle_json, ensure_ascii=False)
-
-    text_segments = []
-    for event in subtitle_json['events']:
-        segs = event.get('segs')
-        if not segs:
-            continue
-        for seg in segs:
-            seg_text = seg.get('utf8', '').strip()
-            # 改行のみや [音楽] などの注釈を除外
-            if not seg_text:
-                continue
-            if seg_text == '\n':
-                continue
-            if seg_text.startswith('[') and seg_text.endswith(']'):
-                continue
-            text_segments.append(seg_text)
-    return ' '.join(text_segments)
-
 @app.get("/users/{user_id}/summaries", response_model=UserSummariesResponse)
 def get_user_summaries(user_id: str):
     session: Session = SessionLocal()
@@ -433,7 +296,7 @@ def get_user_summaries(user_id: str):
         user = session.query(User).filter(User.id == user_id).first()
         if not user:
             raise HTTPException(status_code=404, detail="ユーザーが見つかりません。")
-
+        
         # Video テーブルから user_id で直接フィルタリング
         videos = (
             session.query(Video)
@@ -441,7 +304,7 @@ def get_user_summaries(user_id: str):
             .order_by(Video.updated_at.desc())
             .all()
         )
-
+        
         summaries = []
         for video in videos:
             summaries.append(VideoSummary(
@@ -449,11 +312,11 @@ def get_user_summaries(user_id: str):
                 title=video.title,
                 summary_date=video.updated_at.isoformat() if video.updated_at else None,
                 channel_name=video.channel_title,
-                channel_id=str(video.channel_id),
+                channel_id=str(video.channel_id),  # ここで channel_id を追加
                 thumbnail_high=video.thumbnail_high,
                 updated_at=video.updated_at,
-                summary="",
-                keyPoints=""
+                summary="",       # 要約情報
+                keyPoints= ""         # 重要ポイント
             ))
         return UserSummariesResponse(userId=str(user.id), summaries=summaries)
     except Exception as e:
@@ -466,10 +329,7 @@ def get_user_summaries(user_id: str):
 def get_video_summary(video_id: str):
     session: Session = SessionLocal()
     try:
-        video = session.query(Video).filter(
-            Video.youtube_video_id == video_id,
-            Video.summary_text.isnot(None)
-        ).first()
+        video = session.query(Video).filter(Video.youtube_video_id == video_id, Video.summary_text.isnot(None)).first()
         if not video:
             raise HTTPException(status_code=404, detail="動画の要約が見つかりません。")
         return VideoSummary(
@@ -479,9 +339,9 @@ def get_video_summary(video_id: str):
             channel_name=video.channel_title,
             channel_id=str(video.channel_id),
             thumbnail_high=video.thumbnail_high,
-            updated_at=video.updated_at,
-            summary=video.summary_text or "",
-            keyPoints=video.final_points or ""
+            updated_at=video.updated_at,  # ここを追加
+            summary=video.summary_text or "",       # 要約情報
+            keyPoints=video.final_points or ""         # 重要ポイント
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -501,7 +361,7 @@ def get_channel_summaries_by_string_id(channel_id: str):
         if not channel:
             raise HTTPException(status_code=404, detail="チャンネルが見つかりません。")
 
-        # 2) channel.id を利用し、要約済み動画を取得
+        # 2) 見つかった channel の内部PK (channel.id) を利用し、要約済み動画を取得
         videos = (
             session.query(Video)
             .filter(Video.channel_id == channel.id, Video.summary_text.isnot(None))
@@ -517,7 +377,7 @@ def get_channel_summaries_by_string_id(channel_id: str):
                 title=video.title,
                 summary_date=video.updated_at.isoformat() if video.updated_at else None,
                 channel_name=video.channel_title,
-                channel_id=str(video.channel_id),
+                channel_id=str(video.channel_id),  # channel_id は数値。文字列化
                 thumbnail_high=video.thumbnail_high,
                 updated_at=video.updated_at,
                 summary=video.summary_text or "",
@@ -541,13 +401,14 @@ def get_channel_summaries_by_string_id(channel_id: str):
     finally:
         session.close()
 
+
 @app.post("/user_channels")
 def create_user_channel(req: UserChannelCreate, db: Session = Depends(get_db)):
     """
     user_id: UUID (auth.users.id)
     channel_id: str (YouTube channelId)
     """
-    # 1) 既存の user_channels を数値の channel.id で検索しないこと
+    # 1) 既存の user_channels を数値の channel.id で検索しないこと！
     #    → まずは channels テーブルを find-or-create する
 
     # 1. YouTubeのチャンネル詳細を取得
@@ -559,7 +420,7 @@ def create_user_channel(req: UserChannelCreate, db: Session = Depends(get_db)):
     if not channel:
         # ない場合は新規作成
         channel = Channel(
-            channel_id=details["channel_id"],
+            channel_id=details["channel_id"],             # ここは文字列
             channel_name=details["channel_name"],
             channel_description=details["channel_description"],
             channel_thumbnail_url=details["channel_thumbnail_url"],
@@ -570,7 +431,7 @@ def create_user_channel(req: UserChannelCreate, db: Session = Depends(get_db)):
         )
         db.add(channel)
         db.commit()
-        db.refresh(channel)  # channel.id (数値) が発行される
+        db.refresh(channel)  # ここで channel.id (数値) が発行される
 
     # 3. user_channels テーブルで、(user_id, channel.id) の組を探す
     assoc = db.query(UserChannel).filter(
@@ -584,7 +445,7 @@ def create_user_channel(req: UserChannelCreate, db: Session = Depends(get_db)):
     # 4. 新しい紐付けを作成
     new_assoc = UserChannel(
         user_id=req.user_id,
-        channel_id=channel.id
+        channel_id=channel.id  # ここは channel.id (数値)
     )
     db.add(new_assoc)
     db.commit()
@@ -594,12 +455,13 @@ def create_user_channel(req: UserChannelCreate, db: Session = Depends(get_db)):
     return details
 
 # --- GET エンドポイント: ユーザーIDを元に登録チャンネル一覧を取得 ---
+
 @app.get("/users/{user_id}/channels", response_model=list[ChannelResponse])
 def get_user_channels(user_id: str, db: Session = Depends(get_db)):
     associations = db.query(UserChannel).filter(UserChannel.user_id == user_id).all()
     if not associations:
         return []
-
+    
     channel_list = []
     for assoc in associations:
         ch = db.query(Channel).filter(Channel.id == assoc.channel_id).first()

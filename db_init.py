@@ -48,6 +48,7 @@ CREATE_TABLE_QUERIES = [
       `thumbnail_default` VARCHAR(255),
       `thumbnail_medium` VARCHAR(255),
       `thumbnail_high` VARCHAR(255),
+      `audio_url` VARCHAR(255),
       `transcript_text` LONGTEXT,
       `summary_text` LONGTEXT,
       `final_points` LONGTEXT,
