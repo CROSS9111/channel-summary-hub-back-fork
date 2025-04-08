@@ -9,3 +9,5 @@ venv
 *.zip
 *.json
 *copy*
+*ipynb
+*txt

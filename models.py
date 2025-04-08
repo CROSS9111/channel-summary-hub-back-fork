@@ -9,7 +9,10 @@ from sqlalchemy import create_engine
 from sqlalchemy.dialects.postgresql import BIGINT, UUID,JSONB
 from datetime import datetime
 
-load_dotenv(".env.local", override=True)
+load_dotenv(".env")
+
+if os.getenv("ENV") == "LOCAL":
+    load_dotenv(".env.local", override=True)
 
 ##MySQL
 # DB_HOST = os.getenv("DB_HOST", "localhost")

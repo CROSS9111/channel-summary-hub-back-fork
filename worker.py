@@ -6,7 +6,10 @@ import logging
 from dotenv import load_dotenv
 from tasks import summarize_text, process_chain_tasks
 
-load_dotenv(".env.local", override=True)
+load_dotenv(".env")
+
+if os.getenv("ENV") == "LOCAL":
+    load_dotenv(".env.local", override=True)
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)

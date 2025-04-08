@@ -16,10 +16,15 @@ from langchain.text_splitter import CharacterTextSplitter
 import json
 import os
 from fastapi import HTTPException  # 必要に応じてインポート
-from openai import AzureOpenAI
+from openai import AzureOpenAI, OpenAI
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.DEBUG)  # DEBUGレベルも出力する
+
+load_dotenv(".env")
+
+if os.getenv("ENV") == "LOCAL":
+    load_dotenv(".env.local", override=True)
 
 def download_audio(video_id: int, youtube_url: str):
     logger.info(f"[download_audio] Start video_id={video_id}, youtube_url={youtube_url}")
@@ -40,8 +45,9 @@ def download_audio(video_id: int, youtube_url: str):
             audio_path_template = os.path.join(tmpdir, f"{video_id}.%(ext)s")
             logger.debug(f"Audio path template: {audio_path_template}")
             ydl_opts = {
-                'format': 'bestaudio/best',
+                'format': 'bestaudio[ext=m4a]/bestaudio/best',
                 'outtmpl': audio_path_template,
+                'cookiefile': os.getenv('YTDLP_COOKIEFILE', 'cookie.txt'),  # cookie.txt を利用
                 'postprocessors': [{
                     'key': 'FFmpegExtractAudio',
                     'preferredcodec': 'mp3',
@@ -97,6 +103,10 @@ def download_audio(video_id: int, youtube_url: str):
 def transcribe_audio(video_id: int, audio_url: str):
     logger.info(f"[transcribe_audio] Start video_id={video_id}, audio_url={audio_url}")
     session = SessionLocal()
+
+    # OpenAI クライアントの初期化
+    openai_client = OpenAI()
+
     try:
         db_task = DBTask(
             video_id=video_id,
@@ -144,13 +154,26 @@ def transcribe_audio(video_id: int, audio_url: str):
             transcript_text = ""
             split_files = sorted(glob.glob(os.path.join(split_dir, "split_*.mp3")))
             logger.debug(f"Split files: {split_files}")
+            # 分割ファイルごとに書き起こし
             for sf in split_files:
-                transcript_text += f"Transcription of {sf}\n"
+                logger.debug(f"Transcribing split file: {sf}")
+                with open(sf, "rb") as audio_file:
+                    transcription = openai_client.audio.transcriptions.create(
+                        model="gpt-4o-transcribe",
+                        file=audio_file,
+                        response_format="text"
+                    )
+                transcript_text += transcription + "\n"
         else:
             logger.info(f"File size is {file_size_mb:.2f}MB, no splitting needed.")
             with open(temp_mp3_path, "rb") as audio_file:
-                transcript_text = f"Transcription of audio for {video_id}"
-        
+                transcription = openai_client.audio.transcriptions.create(
+                    model="gpt-4o-transcribe",
+                    file=audio_file,
+                    response_format="text"
+                )
+            transcript_text = transcription
+
         db_video = session.query(Video).filter(Video.id == video_id).first()
         if db_video:
             db_video.transcript_text = transcript_text

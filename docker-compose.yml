@@ -1,0 +1,22 @@
+version: "3.8"
+
+services:
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${WORKER_IMAGE}      # .env から WORKER_IMAGE を読み込む
+    env_file:
+      - .env                    # サービスに環境変数を注入
+    command: python worker.py
+    # 必要ならポート開放やボリュームも指定
+    # ports:
+    #   - "8000:8000"
+
+  redis:
+    image: redis:6
+    env_file:
+      - .env      # REDIS_PASSWORD 等を注入
+    # ── ③ Redis は外からアクセスするのでポートマッピング ──
+    ports:
+      - "${REDIS_PORT}:6379"

@@ -20,7 +20,10 @@ from sqlalchemy.orm import Session
 # 先ほど作成した RedisTaskQueue クラスをインポート
 from redis_queue import RedisTaskQueue
 
-load_dotenv(".env.local", override=True)
+load_dotenv(".env")
+
+if os.getenv("ENV") == "LOCAL":
+    load_dotenv(".env.local", override=True)
 
 # ロギング設定（DEBUG レベルのログをコンソール出力）
 logging.basicConfig(level=logging.DEBUG, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -266,7 +269,7 @@ def summarize_youtube(request: SummaryRequest):
 
     try:
         # 字幕取得（優先言語: 日本語, 英語）
-        transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=["ja, en"])
+        transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=["ja"])
         transcript_text = " ".join([item["text"] for item in transcript_list])
         db_video.transcript_text = transcript_text
         print("transcript_text",transcript_text)
