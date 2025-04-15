@@ -269,8 +269,8 @@ def summarize_youtube(request: SummaryRequest):
 
     try:
         # 字幕取得（優先言語: 日本語, 英語）
-        ip = "72.52.87.199"
-        port = "3128"
+        ip = "52.68.212.117"
+        port = "6111"
         proxies = {
             "http":  f"http://{ip}:{port}",
             "https": f"https://{ip}:{port}"
