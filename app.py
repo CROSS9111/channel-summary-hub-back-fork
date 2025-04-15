@@ -276,7 +276,7 @@ def summarize_youtube(request: SummaryRequest):
             "https": f"https://{ip}:{port}"
         }
 
-        transcript_list = YouTubeTranscriptApi.get_transcript(video_id,proxies=proxies,timeout=10, languages=["ja"])
+        transcript_list = YouTubeTranscriptApi.get_transcript(video_id,proxies=proxies,languages=["ja"])
         transcript_text = " ".join([item["text"] for item in transcript_list])
         db_video.transcript_text = transcript_text
         print("transcript_text",transcript_text)
