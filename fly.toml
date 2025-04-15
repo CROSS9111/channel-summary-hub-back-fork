@@ -15,9 +15,10 @@ primary_region = 'nrt'
   auto_start_machines = true
   min_machines_running = 0
   processes = ['app']
-  
+
 [processes]
   app = "uvicorn app:app --host 0.0.0.0 --port 8080"
+  worker = "python worker.py"
 
 [[vm]]
   memory = '1gb'
